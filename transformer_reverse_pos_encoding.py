@@ -4,16 +4,66 @@ import torch.optim as optim
 import numpy as np
 import copy
 import math
+import random
+
 torch.set_printoptions(sci_mode=False)
 
+# Modell parameters
+num_epochs = 1000
+batch_size = 8
+
+dim_model = 128
+num_heads = 8
+num_layers = 3
+
+num_symbols = 10 # --> 10 digits
+SOS = num_symbols
+EOS = num_symbols + 1
+PLUS = num_symbols + 2
+PAD = num_symbols + 3
+SOS_token = torch.tensor([[SOS]] * batch_size)
+EOS_token = torch.tensor([[EOS]] * batch_size)
+num_tokens = num_symbols + 4  # num_symbols + <eos> and <sos> tokens
 
 def calc_target(x):
     """
     Calculate the target from the input.
     """
     y = copy.deepcopy(x)
-    y[0] = reversed(y[0])
+    #y[0] = reversed(y[0])
     return y
+
+def generate_encoded_tensors(batch_size, num_symbols, device='cpu'):
+    numbers_batch = []
+    results_batch = []
+
+    for _ in range(batch_size):
+        # Két háromjegyű véletlenszám generálása
+        num1 = random.randint(100, 999)
+        num2 = random.randint(100, 999)
+
+        # A számok összege
+        sum_result = num1 + num2
+
+        # A számok és a '+' jelet 13-as számmal kódolva
+        encoded_numbers = [int(digit) for digit in str(num1)] + [PLUS] + [int(digit) for digit in str(num2)]
+
+        # Az összeg számjegyenként kódolva
+        encoded_result = [int(digit) for digit in str(sum_result)]
+
+        # Normalizálás a megadott num_symbols hosszára, 14-es értékkel feltöltve
+        encoded_numbers += [PAD] * (num_symbols - len(encoded_numbers))
+        encoded_result += [PAD] * (num_symbols - len(encoded_result))
+
+        # Tenzorok hozzáadása a batch-ekhez
+        numbers_batch.append(encoded_numbers)
+        results_batch.append(encoded_result)
+
+    # Tenzorok létrehozása a batch-ekből
+    numbers_tensor = torch.tensor(numbers_batch).to(device)
+    result_tensor = torch.tensor(results_batch).to(device)
+    
+    return numbers_tensor, result_tensor
 
 class PositionalEncoding(nn.Module):
 
@@ -38,8 +88,8 @@ class SimpleTransformerModel(nn.Module):
         super(SimpleTransformerModel, self).__init__()
         self.embedding = nn.Embedding(num_tokens, dim_model)
         self.transformer = nn.Transformer(d_model=dim_model, nhead=num_heads, num_encoder_layers=num_layers, num_decoder_layers=num_layers, batch_first=True)
-        self.output_layer = nn.Linear(dim_model, num_tokens)
-        self.posencoding = PositionalEncoding(dim_model, max_len = batch_size, dropout=0.1)
+        self.output_layer = nn.Linear(dim_model, 1)
+        self.posencoding = PositionalEncoding(dim_model, max_len = batch_size, dropout=0.3)
         self.dim_model = dim_model
     def forward(self, src, tgt, tgt_mask=None):
         src = self.embedding(src) * math.sqrt(self.dim_model) 
@@ -65,21 +115,6 @@ class SimpleTransformerModel(nn.Module):
         
         return mask
 
-# Modell parameters
-num_epochs = 100
-batch_size = 32
-
-num_symbols = 10 # --> 10 digits
-SOS = num_symbols
-EOS = num_symbols + 1
-SOS_token = torch.tensor([[SOS]] * batch_size)
-EOS_token = torch.tensor([[EOS]] * batch_size)
-num_tokens = num_symbols + 2  # num_symbols + <eos> and <sos> tokens
-
-dim_model = 32
-num_heads = 8
-num_layers = 3
-
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = SimpleTransformerModel(num_tokens, dim_model, num_heads, num_layers).to(device)
 
@@ -92,10 +127,7 @@ for epoch in range(num_epochs):
     model.train()
     optimizer.zero_grad()
 
-    # simulated data: input from 1 to 10, output from 10 to 100
-    input = torch.stack([torch.randperm(num_symbols) for _ in range(batch_size)])
-
-    target = calc_target(input)
+    input, target = generate_encoded_tensors(batch_size, num_symbols)
 
     input = torch.cat((SOS_token, input, EOS_token), dim=1).to(device)
     target = torch.cat((SOS_token, target, EOS_token), dim=1).to(device)
@@ -121,9 +153,8 @@ for epoch in range(num_epochs):
 # test
 model.eval()
 with torch.no_grad():
-    test_input = torch.stack([torch.randperm(num_symbols) for _ in range(1)]).to(device)
-
-    test_expected = calc_target(test_input)
+    
+    test_input, test_expected = generate_encoded_tensors(1,num_symbols, device)
 
     test_target = torch.tensor([[SOS]]).to(device)
     for i in range(num_tokens):
@@ -134,6 +165,6 @@ with torch.no_grad():
         test_target = torch.cat((test_target, next_item), dim=1).to(device)
 
     print(f'input            : {test_input}')
-    print(f'expected output  : {test_expected}')
     print(f'predicted output : {test_target[0][1:num_tokens]}') # try to cut <sos> and <eos>
-
+    print(f'expected output  : {test_expected}')
+    

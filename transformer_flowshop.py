@@ -1,21 +1,32 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from sklearn.preprocessing import PolynomialFeatures
 
 import math
 import numpy as np
 import random
+import os
 
 torch.set_printoptions(sci_mode=False)
-
+np.random.seed(42)  # A reprodukálhatóság érdekében
+torch.manual_seed(100)
 # settings
 num_jobs = 20
 SOS = num_jobs
 EOS = num_jobs + 1
 num_tokens = num_jobs + 2
 num_machines = 5
-num_epochs = 10
-batch_size = 128
+num_epochs = 8
+batch_size = 256
+model_path = 'saved_models/flowshop_model.pth'
+
+if os.path.exists(model_path):
+    print("A modell fájl létezik.")
+    train_requierd = False
+else:
+    print("A modell fájl nem létezik.")
+    train_requierd = True
 
 class PositionalEncoding(nn.Module):
     def __init__(self, dim_model, dropout_p, max_len):
@@ -56,6 +67,7 @@ class Transformer(nn.Module):
         num_encoder_layers,
         num_decoder_layers,
         dropout_p,
+        embedding_matrix
     ):
         super().__init__()
 
@@ -65,10 +77,15 @@ class Transformer(nn.Module):
 
         # LAYERS
         self.positional_encoder = PositionalEncoding(
-            dim_model=dim_model, dropout_p=dropout_p, max_len=batch_size
+            dim_model=dim_model, dropout_p=dropout_p, max_len=5000
         )
         self.embedding = nn.Embedding(num_tokens, dim_model)
-        self.transformer = nn.Transformer(
+        #self.embedding.weight.data.copy_(embedding_matrix)
+
+        # Opcionális: Ha nem szeretnéd, hogy az embedding súlyai módosuljanak a tanítás során
+        #self.embedding.weight.requires_grad = False
+        
+        self.transformer = nn.Transformer(dim_feedforward=2048,
             d_model=dim_model,
             nhead=num_heads,
             num_encoder_layers=num_encoder_layers,
@@ -91,7 +108,8 @@ class Transformer(nn.Module):
         # to obtain size (sequence length, batch_size, dim_model),
         source = source.permute(1,0,2)
         target = target.permute(1,0,2)
-
+        if tgt_mask == None:
+            tgt_mask=self.get_tgt_mask(target.shape[0])
         # Transformer blocks - Out size = (sequence length, batch_size, num_tokens)
         transformer_out = self.transformer(source, target, tgt_mask=tgt_mask, src_key_padding_mask=src_pad_mask, tgt_key_padding_mask=tgt_pad_mask)
         out = self.out(transformer_out)
@@ -142,6 +160,26 @@ machine_job_matrix = [
 # converting to num_jobs x num_machines NumPy array
 machine_job_matrix = np.array(machine_job_matrix).reshape(num_jobs, num_machines)
 
+poly = PolynomialFeatures(degree=6, include_bias=False)
+
+# Alkalmazzuk a polinomiális transzformációt a mátrixon
+embedding_matrix = poly.fit_transform(machine_job_matrix)
+
+embedding_matrix = embedding_matrix[:, :256]
+
+sos_column = np.ones((embedding_matrix.shape[1], 1)).T  # Minden munkához 1-es érték az SOS-hez
+eos_column = np.zeros((embedding_matrix.shape[1], 1)).T
+
+embedding_matrix = np.concatenate([embedding_matrix, sos_column, eos_column])
+
+from sklearn.preprocessing import StandardScaler
+
+# Inicializáljuk a StandardScaler-t
+scaler = StandardScaler()
+
+# Alkalmazzuk a scaler-t az embedding mátrixra
+embedding_matrix = scaler.fit_transform(embedding_matrix)
+
 def generate_flowshop_dataset(num_samples):
     dataset = []
     
@@ -156,11 +194,11 @@ def generate_flowshop_dataset(num_samples):
         makespan_1 = calculate_makespan(machine_job_matrix, job_order_1)
         counter = 0
         while True:
-            job_order_tmp = list(job_order_1)
-            i = random.randint(0, num_jobs - 1)
-            j = random.randint(0, num_jobs - 1)
-            job_order_tmp[i], job_order_tmp[j] = job_order_tmp[j], job_order_tmp[i]
-
+            job_order_tmp = list(range(num_jobs))
+            #i = random.randint(0, num_jobs - 1)
+            #j = random.randint(0, num_jobs - 1)
+            #job_order_tmp[i], job_order_tmp[j] = job_order_tmp[j], job_order_tmp[i]
+            random.shuffle(job_order_tmp)
             makespan_2 = calculate_makespan(machine_job_matrix, job_order_tmp)
             if makespan_2 < makespan_1:
                 job_order_1 = np.concatenate((SOS_token, job_order_1, EOS_token))
@@ -218,19 +256,30 @@ def batchify_data(data, batch_size=batch_size, padding=False, padding_token=-1):
     return batches
 
 # generating dataset
-train_data = generate_flowshop_dataset(5000)
-val_data = generate_flowshop_dataset(500)
-test_data = generate_flowshop_dataset(10)
+if train_requierd == True:
+    train_data = generate_flowshop_dataset(10000)
+    train_dataloader = batchify_data(train_data)
 
-train_dataloader = batchify_data(train_data)
+val_data = generate_flowshop_dataset(batch_size * 2)
 val_dataloader = batchify_data(val_data)
+
+test_data = generate_flowshop_dataset(batch_size * 2)
+test_dataloader = batchify_data(test_data)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = Transformer(
-    num_tokens=num_tokens, dim_model=128, num_heads=8, num_encoder_layers=3, num_decoder_layers=3, dropout_p=0.4
+    num_tokens=num_tokens, dim_model=256, num_heads=32, num_encoder_layers=2, num_decoder_layers=2, dropout_p=0.1,
+    embedding_matrix=torch.Tensor(embedding_matrix)
 ).to(device)
+
 opt = optim.Adam(model.parameters(), lr=0.001)
 loss_fn = nn.CrossEntropyLoss()
+
+scheduler1 = torch.optim.lr_scheduler.StepLR(opt, step_size=5, gamma=0.5)
+scheduler2 = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.9)
+
+if train_requierd == False:
+    model.load_state_dict(torch.load(model_path))
 
 def train_loop(model, opt, loss_fn, dataloader):
     model.train()
@@ -260,7 +309,10 @@ def train_loop(model, opt, loss_fn, dataloader):
         opt.step()
     
         total_loss += loss.detach().item()
-        
+    
+    scheduler1.step()
+    scheduler2.step()
+    
     return total_loss / len(dataloader)
 
 def validation_loop(model, loss_fn, dataloader):
@@ -325,7 +377,6 @@ def predict(model, input_sequence, max_length=num_tokens):
         tgt_mask = model.get_tgt_mask(y_input.size(1)).to(device)
         
         pred = model(input_sequence, y_input, tgt_mask)
-        
         k = random.randint(1, 2) # simulate generative network
         next_item = pred.topk(k)[1].view(-1)[-1].item() # num with highest probability
         if next_item == EOS:
@@ -341,20 +392,30 @@ def predict(model, input_sequence, max_length=num_tokens):
 
     return y_input.view(-1).tolist()
 
-train_loss_list, validation_loss_list = fit(model, opt, loss_fn, train_dataloader, val_dataloader, num_epochs)
+if train_requierd:
+    train_loss_list, validation_loss_list = fit(model, opt, loss_fn, train_dataloader, val_dataloader, num_epochs)
+    # Modell mentése
+    torch.save(model.state_dict(), model_path)
 
 job_order_1 = list(range(num_jobs))
 random.shuffle(job_order_1)
 example = torch.tensor([np.concatenate((np.array([SOS]), job_order_1, np.array([EOS])))], dtype=torch.long, device=device)
 
-for i in range(20): # continous generation from a starting sequence
+for i in range(100): # continous generation from a starting sequence
     result = predict(model, example)
     if len(result) != num_tokens:
-        continue
+        print(f"Invalid result: {result[1:-1]}")
+        break
     input = example.view(-1).tolist()[1:-1]
     valid = len(result[1:-1]) == len(set(result[1:-1]))
-    print(f"Input: {input} - Makespan: {calculate_makespan(machine_job_matrix, input)}")
-    print(f"Prediction ({valid}): {result[1:-1]} - Makespan: {calculate_makespan(machine_job_matrix, result[1:-1])}")
+
+    input_makespan = calculate_makespan(machine_job_matrix, input)
+    target_makespan = calculate_makespan(machine_job_matrix, result[1:-1])
+    if input_makespan <= target_makespan:
+        print("Not better")
+        continue
+    print(f"Input: {input} - Makespan: {input_makespan}")
+    print(f"Prediction ({valid}): {result[1:-1]} - Makespan: {target_makespan}")
     print()
     example = torch.tensor([result], dtype=torch.long, device=device)
   

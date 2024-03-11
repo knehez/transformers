@@ -1,2 +1,8 @@
 .venv
 .vscode
+c_sources/
+__pycache__/
+emails/
+custom_tokenizer/
+saved_models/
+tokenizer/
